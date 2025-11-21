@@ -1,30 +1,32 @@
+import streamlit as st
 import datetime
 import yfinance as yf
 import pandas as pd
 
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Smart Price Voter", page_icon="🗳️", layout="wide")
+
 # --- CONFIGURATION ---
-# Famous "Smart Money" funds we look for in the Top Holders list
 SMART_MONEY_WATCHLIST = {
-    "Vanguard Group": 0.85,        # High credibility for stability
-    "Blackrock": 0.80,             # High credibility for flow
-    "Berkshire Hathaway": 0.99,    # The Oracle (Highest)
+    "Vanguard Group": 0.85,
+    "Blackrock": 0.80,
+    "Berkshire Hathaway": 0.99,
     "State Street": 0.75,
     "Morgan Stanley": 0.70,
     "Goldman Sachs": 0.70,
-    "Tiger Global": 0.90,          # Tech Specialist
-    "Appaloosa": 0.95,             # Tepper
-    "Duquesne": 0.95,              # Druckenmiller
+    "Tiger Global": 0.90,
+    "Appaloosa": 0.95,
+    "Duquesne": 0.95,
     "Geode Capital": 0.65,
 }
 
+# --- CLASSES ---
 class Voter:
-    """Base class for anyone 'voting' on the stock price."""
     def __init__(self, name, credibility_score):
         self.name = name
         self.credibility_score = credibility_score
 
 class Analyst(Voter):
-    """Sell-Side Analyst giving a specific Price Target."""
     def __init__(self, name, firm, credibility_score, price_target, rating_date):
         super().__init__(name, credibility_score)
         self.firm = firm
@@ -32,31 +34,24 @@ class Analyst(Voter):
         self.rating_date = rating_date
 
     def get_recency_weight(self):
-        """Decay weight if the rating is old."""
         if not self.rating_date:
-            return 0.5 # Penalize undated generic data
-        
+            return 0.5
         days_old = (datetime.datetime.now() - self.rating_date).days
         if days_old < 30: return 1.0
         if days_old < 90: return 0.8
         return 0.5
 
 class FundManager(Voter):
-    """Buy-Side Manager 'voting' with capital allocation."""
     def __init__(self, name, fund_name, credibility_score, action, conviction_level):
         super().__init__(name, credibility_score)
         self.fund_name = fund_name
-        self.action = action  # "BUY", "HOLD", "SELL" (Derived from holding size/presence)
+        self.action = action 
         self.conviction_level = conviction_level 
 
 class MarketDataProvider:
-    """Fetches 'reachable' data using yfinance (Free)."""
     @staticmethod
     def get_real_data(ticker_symbol):
-        print(f"\n📡 Connecting to Yahoo Finance for {ticker_symbol}...")
         stock = yf.Ticker(ticker_symbol)
-        
-        # 1. Fetch Analyst Consensus & Targets
         try:
             info = stock.info
             current_price = info.get('currentPrice', 0.0)
@@ -64,37 +59,26 @@ class MarketDataProvider:
             target_high = info.get('targetHighPrice', 0.0)
             target_low = info.get('targetLowPrice', 0.0)
             num_analysts = info.get('numberOfAnalystOpinions', 0)
-            print(f"   -> Price: ${current_price} | Consensus: ${target_mean} ({num_analysts} analysts)")
-        except Exception as e:
-            print(f"   ⚠️ Error fetching basic info: {e}")
+        except Exception:
             return None
 
-        # 2. Fetch Institutional Holders (The 'Smart Money' Vote)
         holders_data = []
         try:
-            # yfinance returns a DataFrame for institutional_holders
             inst_holders = stock.institutional_holders
             if inst_holders is not None and not inst_holders.empty:
-                # Convert to list of dicts for easier processing
-                # Columns usually: ['Holder', 'Shares', 'Date Reported', '% Out', 'Value']
                 for index, row in inst_holders.iterrows():
                     holders_data.append({
                         "Holder": row.get('Holder', 'Unknown'),
                         "Pct_Held": row.get('% Out', 0),
                         "Shares": row.get('Shares', 0)
                     })
-                print(f"   -> Found {len(holders_data)} major institutional holders.")
-            else:
-                print("   -> No institutional holder data available.")
-        except Exception as e:
-            print(f"   ⚠️ Error fetching holders: {e}")
+        except Exception:
+            pass
 
-        # 3. Fetch Recent Upgrades/Downgrades (Analyst Actions)
         recent_ratings = []
         try:
             upgrades = stock.upgrades_downgrades
             if upgrades is not None and not upgrades.empty:
-                # Get last 5 ratings
                 latest = upgrades.tail(5)
                 for index, row in latest.iterrows():
                     recent_ratings.append({
@@ -103,13 +87,12 @@ class MarketDataProvider:
                         "ToGrade": row.get('ToGrade', 'Unknown'),
                         "Date": index
                     })
-                print(f"   -> Found recent analyst actions from: {', '.join([r['Firm'] for r in recent_ratings])}")
-        except Exception as e:
-            print(f"   ⚠️ Error fetching upgrades: {e}")
+        except Exception:
+            pass
 
         return {
             "current_price": current_price,
-            "targets": {"mean": target_mean, "high": target_high, "low": target_low},
+            "targets": {"mean": target_mean, "high": target_high, "low": target_low, "count": num_analysts},
             "holders": holders_data,
             "ratings": recent_ratings
         }
@@ -120,37 +103,29 @@ class SmartPriceEngine:
         self.current_price = 0.0
         self.analysts = []
         self.funds = []
+        self.raw_data = None
 
-    def load_real_data(self):
-        data = MarketDataProvider.get_real_data(self.ticker)
-        if not data:
-            print("❌ Failed to load data.")
-            return
-
-        self.current_price = data["current_price"]
-        targets = data["targets"]
+    def load_data(self):
+        self.raw_data = MarketDataProvider.get_real_data(self.ticker)
+        if not self.raw_data or self.raw_data['current_price'] == 0:
+            return False
         
-        # --- 1. BUILD ANALYST VOTERS ---
-        # We create "Composite Analysts" based on the High/Low/Mean data
+        self.current_price = self.raw_data["current_price"]
+        targets = self.raw_data["targets"]
+        
+        # Build Composite Analysts
         if targets["mean"] > 0:
             self.analysts.append(Analyst("Street Consensus", "Avg", 0.5, targets["mean"], datetime.datetime.now()))
-        
         if targets["high"] > 0:
-             # The "Bull" Analyst
             self.analysts.append(Analyst("Street High", "Optimistic", 0.7, targets["high"], datetime.datetime.now()))
-            
         if targets["low"] > 0:
-            # The "Bear" Analyst
             self.analysts.append(Analyst("Street Low", "Pessimistic", 0.7, targets["low"], datetime.datetime.now()))
 
-        # Add specific recent ratings if available
-        for r in data["ratings"]:
-            # Estimate target based on grade (since yfinance doesn't give the exact target in this DF)
-            # Buy = +15%, Hold = 0%, Sell = -15% relative to current price
+        # Build Specific Analysts
+        for r in self.raw_data["ratings"]:
             est_target = self.current_price
             credibility = 0.6
-            
-            grade = r["ToGrade"].lower()
+            grade = str(r["ToGrade"]).lower()
             if "buy" in grade or "outperform" in grade or "overweight" in grade:
                 est_target = self.current_price * 1.15
                 credibility = 0.8
@@ -158,90 +133,149 @@ class SmartPriceEngine:
                 est_target = self.current_price * 0.85
                 credibility = 0.8
             
-            self.analysts.append(Analyst(f"Recent: {r['Firm']}", r['Firm'], credibility, est_target, r['Date']))
+            # Convert Pandas Timestamp to python datetime if needed
+            rating_date = r['Date'].to_pydatetime() if isinstance(r['Date'], pd.Timestamp) else r['Date']
+            self.analysts.append(Analyst(r['Firm'], "Recent Rating", credibility, est_target, rating_date))
 
-        # --- 2. BUILD FUND MANAGER VOTERS ---
-        # We match the real holders against our "Smart Money Watchlist"
-        for holder in data["holders"]:
+        # Build Fund Managers
+        for holder in self.raw_data["holders"]:
             holder_name = holder["Holder"]
-            
-            # Check if this holder is in our watchlist (partial match)
-            matched_smart_investor = None
+            matched = None
             for smart_name, score in SMART_MONEY_WATCHLIST.items():
                 if smart_name.lower() in holder_name.lower():
-                    matched_smart_investor = (smart_name, score)
+                    matched = (smart_name, score)
                     break
             
-            if matched_smart_investor:
-                name, score = matched_smart_investor
-                # If they are in the top 10, it's a high conviction hold
-                # We treat presence in Top 10 as a "BUY/HOLD" vote
+            if matched:
+                name, score = matched
                 self.funds.append(FundManager(holder_name, name, score, "BUY", 0.8))
             else:
-                # Generic Top Holder (lower credibility but still huge money)
                 self.funds.append(FundManager(holder_name, "Institutional", 0.4, "BUY", 0.5))
+        return True
 
-    def calculate_smart_consensus(self):
-        if self.current_price == 0:
-            print("⚠️ No price data found. Exiting.")
-            return
-
-        print(f"\n\n--- 📊 CALCULATING SMART CONSENSUS FOR ${self.ticker} ---")
-        print(f"Market Price: ${self.current_price:.2f}")
-
-        # --- ANALYST CALCULATION ---
+    def calculate(self):
+        # Analyst Weighted Avg
         total_weight = 0
         weighted_sum = 0
+        analyst_details = []
         
-        print("\n[1] Sell-Side Analyst Votes:")
         for a in self.analysts:
             w = a.credibility_score * a.get_recency_weight()
             total_weight += w
             weighted_sum += (a.price_target * w)
-            print(f"  • {a.name:<25} | Target: ${a.price_target:.2f} | Weight: {w:.2f}")
+            analyst_details.append({
+                "Source": f"{a.name} ({a.firm})",
+                "Target": f"${a.price_target:.2f}",
+                "Weight": f"{w:.2f}"
+            })
         
-        if total_weight == 0: base_price = self.current_price
-        else: base_price = weighted_sum / total_weight
-        
-        print(f">> Weighted Analyst Target: ${base_price:.2f}")
+        base_price = weighted_sum / total_weight if total_weight > 0 else self.current_price
 
-        # --- FUND MANAGER CALCULATION ---
-        print("\n[2] Smart Money (Institutional) Votes:")
+        # Fund Manager Sentiment
+        bullish_power = 0
+        fund_details = []
         if not self.funds:
-            print("  (No major smart funds found in Top 10 holders)")
             sentiment_mod = 1.0
         else:
-            bullish_power = 0
-            total_power = 0
-            
             for f in self.funds:
-                # Presence in top holders is generally bullish
                 power = f.credibility_score * f.conviction_level
                 bullish_power += power
-                total_power += f.credibility_score
-                print(f"  • {f.name:<25} | {f.fund_name} | Impact: {power:.2f}")
-
-            # Normalize score (0.0 to 1.0)
-            # If lots of SMART money is present, score goes up.
-            raw_sentiment = bullish_power / len(self.funds) # Average conviction
+                fund_details.append({
+                    "Fund": f"{f.name}",
+                    "Type": f"{f.fund_name}",
+                    "Impact": f"{power:.2f}"
+                })
             
-            # If raw sentiment is high (>0.6), we boost price. If low, we dampen.
-            # Range: 0.90x (Dampener) to 1.10x (Booster)
-            sentiment_mod = 0.90 + (raw_sentiment * 0.20) 
+            raw_sentiment = bullish_power / len(self.funds)
+            sentiment_mod = 0.90 + (raw_sentiment * 0.20)
 
         final_price = base_price * sentiment_mod
-        print(f"\n>> Institutional Modifier: {sentiment_mod:.3f}x")
         
-        print(f"\n================================================")
-        print(f"🎯 SMART FORECAST: ${final_price:.2f}")
-        print(f"   vs Market Price: ${self.current_price:.2f}")
-        print(f"================================================")
+        return {
+            "base_price": base_price,
+            "final_price": final_price,
+            "sentiment_mod": sentiment_mod,
+            "analyst_details": analyst_details,
+            "fund_details": fund_details,
+            "raw_targets": self.raw_data["targets"]
+        }
 
-if __name__ == "__main__":
-    # You can change the ticker here to test different stocks
-    ticker_input = input("Enter Stock Ticker (e.g., TSM, NVDA, GOOGL): ").upper()
-    if not ticker_input: ticker_input = "TSM"
+# --- UI LAYOUT ---
+st.title("🗳️ Smart Price Voter")
+st.markdown("""
+This tool calculates a **Consensus Price Target** by weighting Analyst forecasts based on credibility 
+and adjusting for **Smart Money** (Institutional) conviction.
+""")
+
+ticker = st.text_input("Enter Stock Ticker", value="TSM", max_chars=5).upper()
+
+if st.button("Analyze Smart Forecast", type="primary"):
+    engine = SmartPriceEngine(ticker)
     
-    engine = SmartPriceEngine(ticker_input)
-    engine.load_real_data()
-    engine.calculate_smart_consensus()
+    with st.spinner(f"Fetching data for {ticker}..."):
+        success = engine.load_data()
+    
+    if not success:
+        st.error(f"Could not fetch data for {ticker}. Please check the symbol.")
+    else:
+        result = engine.calculate()
+        
+        # Top Level Metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Current Price", f"${engine.current_price:.2f}")
+        col2.metric("Smart Forecast", f"${result['final_price']:.2f}", 
+                    delta=f"{(result['final_price'] - engine.current_price):.2f}")
+        
+        mod_delta = (result['sentiment_mod'] - 1.0) * 100
+        col3.metric("Smart Money Modifier", f"{result['sentiment_mod']:.3f}x", 
+                    delta=f"{mod_delta:.1f}%", delta_color="off")
+
+        # Data Breakdown
+        st.divider()
+        
+        c1, c2 = st.columns(2)
+        
+        with c1:
+            st.subheader("1. Analyst Votes (Sell-Side)")
+            st.caption("Weighted by recency and historical accuracy.")
+            if result['analyst_details']:
+                st.dataframe(pd.DataFrame(result['analyst_details']), hide_index=True, use_container_width=True)
+            else:
+                st.info("No analyst targets found.")
+            
+            st.markdown(f"**Weighted Analyst Base:** ${result['base_price']:.2f}")
+
+        with c2:
+            st.subheader("2. Fund Manager Votes (Buy-Side)")
+            st.caption("Top 10 Holders screened for 'Smart Money' funds.")
+            if result['fund_details']:
+                st.dataframe(pd.DataFrame(result['fund_details']), hide_index=True, use_container_width=True)
+            else:
+                st.warning("No major institutional holders found in Top 10.")
+
+        # Explanation
+        st.divider()
+        st.subheader("📝 The Verdict")
+        upside = ((result['final_price'] / engine.current_price) - 1) * 100
+        
+        if upside > 15:
+            verdict = "STRONG BUY"
+            color = "green"
+        elif upside > 5:
+            verdict = "ACCUMULATE"
+            color = "blue"
+        elif upside > -5:
+            verdict = "HOLD"
+            color = "orange"
+        else:
+            verdict = "TRIM / AVOID"
+            color = "red"
+            
+        st.markdown(f"""
+        Based on **{len(result['analyst_details'])} analyst inputs** and **{len(result['fund_details'])} institutional votes**, 
+        the Smart Voter model suggests a target of **${result['final_price']:.2f}**.
+        
+        This represents a **{upside:.1f}%** potential move from current levels.
+        
+        **Rating:** :{color}[{verdict}]
+        """)
