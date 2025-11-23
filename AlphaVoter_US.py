@@ -218,7 +218,7 @@ with st.sidebar:
     st.caption("Consensus Engine v2.1")
     
     # Search
-    ticker_input = st.text_input("Enter Ticker", value="ARKK").upper()
+    ticker_input = st.text_input("Enter Ticker", value="TSM").upper()
     
     # API Key Input (Optional)
     api_key = st.text_input("Gemini API Key (Optional)", type="password")
