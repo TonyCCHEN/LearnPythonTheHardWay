@@ -214,14 +214,7 @@ def get_ai_vote(api_key, persona, data, vix, mdd):
         
         Briefly explain your stance (Bullish/Bearish/Neutral) and give a target price.
         """
-        
-        response = model.generate_content(
-    prompt,
-    generation_config=genai.GenerationConfig(
-        safety_settings={"enable_data_logging": False}
-    )
-)
-
+        response = model.generate_content(prompt)
         # Fallback to heuristic for stability in this demo
         return simulate_heuristic_vote(persona, data, vix, mdd) 
     except:
@@ -235,10 +228,8 @@ with st.sidebar:
     st.caption("Consensus Engine v3.0 (Monte Carlo + VIX)")
     
     ticker_input = st.text_input("Enter Ticker", value="NVDA").upper()
-   
-    import os
-api_key = os.getenv("GEMINI_API_KEY")  # set on server only
-
+    api_key = st.text_input("Gemini API Key (Optional)", type="password")
+    
     st.markdown("---")
     st.markdown("### 🗳️ The Board")
     
