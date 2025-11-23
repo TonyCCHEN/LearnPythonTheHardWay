@@ -1,7 +1,5 @@
 streamlit
 yfinance
 pandas
-plotly.graph_objects
-google.generativeai
-random
-time
+plotly
+google-generativeai
