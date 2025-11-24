@@ -160,7 +160,7 @@ with st.sidebar:
     st.subheader("Active Sources")
     
     sources = {
-        "Americas": ["NY Times (USA)", "ABC News (USA)"],
+        "Americas": ["NY Times (USA)", "ABC News (USA)", "TIME (USA)"],
         "Asia": ["Straits Times (SG)", "NHK (Japan)", "PTS (Taiwan)"],
         "Europe": ["The Guardian (UK)", "DW News (DE)"]
     }
@@ -179,7 +179,9 @@ col1, col2 = st.columns([3, 1])
 
 with col1:
     st.title("Global Daily Briefing")
-    st.markdown(f"Synthesized from **7 verified sources** across 3 continents.")
+    # Calculate total sources dynamically so it matches the list (now 8 with TIME)
+    total_sources = sum(len(v) for v in sources.values())
+    st.markdown(f"Synthesized from **{total_sources} verified sources** across 3 continents.")
 
 with col2:
     # The Update Button Logic
