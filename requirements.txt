@@ -4,5 +4,5 @@ pandas
 numpy
 plotly
 google-generativeai
-
-
+sqlite3
+base64
