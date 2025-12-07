@@ -240,37 +240,72 @@ def scan_us_tickers(us_list, start_date, end_date, status_text):
                 failed_tickers.append(ticker)
                 
     return trend_signals, mean_rev_signals, failed_tickers
-
-# --- TW/Single Scanning Function ---
-def scan_tw_tickers(tw_list, start_date, end_date, status_text):
+# --- US/Batch Scanning Function (FINAL PATCH) ---
+def scan_us_tickers(us_list, start_date, end_date, status_text):
     trend_signals = []
     mean_rev_signals = []
     failed_tickers = []
+    total_us = len(us_list)
     
-    for i, ticker in enumerate(tw_list):
-        status_text.text(f"Scanning TW/Single {i+1}/{len(tw_list)}: ({ticker})...")
+    us_batches = [us_list[i:i + BATCH_SIZE] for i in range(0, total_us, BATCH_SIZE)]
+    current_count = 0
+
+    for batch_index, batch in enumerate(us_batches):
+        batch_tickers_str = " ".join(batch)
+        current_count += len(batch)
+
+        status_text.text(f"Scanning US/Batch {batch_index+1}/{len(us_batches)}: ({current_count}/{total_us})...")
         
         try:
-            data = yf.download(ticker, start=start_date, end=end_date, progress=False, show_errors=False)
-            
-            # --- PATCH 1: Cleanup Data ---
-            data = data.apply(pd.to_numeric, errors='coerce')
-            data.dropna(subset=['Close'], inplace=True)
-
-            if data.empty or len(data) < 40:
-                failed_tickers.append(ticker)
-                continue
-            
-            trend_sig, mr_sig = process_ticker_data(data, ticker)
-            if trend_sig: trend_signals.append(trend_sig)
-            if mr_sig: mean_rev_signals.append(mr_sig)
-
-            time.sleep(1.5) # Slow down international requests significantly
-
+            # Fetch data for the batch
+            batch_data = yf.download(batch_tickers_str, start=start_date, end=end_date, progress=False, show_errors=False)
+            time.sleep(1) # Delay between batches
         except Exception:
-            failed_tickers.append(ticker)
-            time.sleep(1.5)
+            failed_tickers.extend(batch)
+            continue
+            
+        for ticker in batch:
+            try:
+                data = pd.DataFrame() # Initialize empty DataFrame for current ticker
 
+                if isinstance(batch_data.columns, pd.MultiIndex):
+                    # --- CRITICAL FIX: Extract using the column names, not just the ticker level ---
+                    # yfinance output structure: ('Close', 'AAPL'), ('High', 'AAPL'), etc.
+                    # We filter columns where the second level (ticker) matches the current ticker
+                    data = batch_data.loc[:, pd.IndexSlice[:, ticker]]
+                    
+                    # Check if data was actually returned for this ticker in the multi-index output
+                    if data.empty or data.shape[1] == 0:
+                        failed_tickers.append(ticker)
+                        continue
+                        
+                    # Drop the ticker level from the column names to get 'Open', 'High', 'Close', etc.
+                    data.columns = data.columns.droplevel(1)
+                    
+                # Handle single ticker case (e.g., if a list only contains one item, yfinance returns a simple DataFrame)
+                elif len(batch) == 1 and ticker == batch[0]: 
+                    data = batch_data
+                else:
+                    # Ticker failed silently during the multi-ticker download (unrecoverable at this stage)
+                    failed_tickers.append(ticker)
+                    continue
+
+                # --- PATCH 1: Cleanup Data ---
+                data = data.apply(pd.to_numeric, errors='coerce')
+                data.dropna(subset=['Close'], inplace=True)
+                
+                if data.empty or len(data) < 40:
+                    failed_tickers.append(ticker)
+                    continue
+
+                # Process indicators and signals
+                trend_sig, mr_sig = process_ticker_data(data, ticker)
+                if trend_sig: trend_signals.append(trend_sig)
+                if mr_sig: mean_rev_signals.append(mr_sig)
+
+            except Exception:
+                failed_tickers.append(ticker)
+                
     return trend_signals, mean_rev_signals, failed_tickers
 
 # --- 5. Main Scanner Logic (Orchestrator) ---
