@@ -16,7 +16,8 @@ RR_TARGET = 2.5
 MIN_VOLUME = 100000  
 MIN_PRICE = 5        
 TSL_BUFFER_PERCENT = 0.02 
-SLOW_DELAY = 1.5 # Delay for ALL tickers (was 1.5s only for TW, now for all)
+SLOW_DELAY = 1.5 # Delay for ALL tickers
+TIMEOUT_SECONDS = 30 # CRITICAL FIX: Increased timeout
 
 # --- 2. Dynamic ATR Multiplier Configuration (unchanged) ---
 ATR_MULTIPLIER_CONFIG = {
@@ -32,14 +33,12 @@ ATR_MULTIPLIER_CONFIG = {
 # --- 3. Ticker List Assembly (unchanged) ---
 def get_ticker_lists():
     sp500_tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'JPM', 'JNJ', 'V', 'WMT', 'PG', 'MA', 'UNH', 'HD', 'BAC', 'LLY', 'NOW', 'DHI']
-    
     us_stocks_custom = [
         'AAPL', 'XLV', 'NFLX', 'ALAB', 'IJR', 'AMD', 'AMZN', 'RMBS', 'VPU', 'VIS', 'SHOP', 'SCHW', 'AVGO', 'ONDS', 
         'QCOM', 'META', 'NVDA', 'MRVL', 'SITM', 'ISRG', 'BRK-B', 'CRWD', 'TSLA', 'ASML', 'PLTR', 'GOOGL', 'HIMS', 
         'VRT', 'NRG', 'RTX', 'NVTS', 'CRUS', 'ENPH', 'PYPL', 'SOFI', 'MU', 'VST', 'AOSL', 'CRDO', 'TEM', 'ZS', 
         'LLY', 'TTEK', 'MORN', 'SPXC', 'GTLS', 'PPC', 'CPAY', 'CAG', 'TAP', 'DVA', 'AA', 'BTC-USD'
     ]
-
     tw_stocks_raw = [
         '2330', '2317', '2454', '2308', '2382', '2891', '3711', '2881', '2882', '2886', '2303', '2357', '2884', 
         '2892', '3231', '2885', '2379', '6669', '2345', '2890', '2887', '5871', '2327', '2883', '3034', '1216', 
@@ -55,9 +54,7 @@ def get_ticker_lists():
         '3406', '6719', '1589', '2417', '1312'
     ]
     tw_tickers = [f"{t}.TW" for t in set(tw_stocks_raw)]
-
     tw_etf = ["00631L.TW"]
-
     return {
         "S&P 500 (Sample)": sp500_tickers,
         "Custom US Stocks": us_stocks_custom,
@@ -66,8 +63,6 @@ def get_ticker_lists():
     }
 
 # --- 4. Helper Functions (Unchanged) ---
-# [Contains calculate_tsl, calculate_take_profit, calculate_rr, calculate_position_sizing]
-
 def calculate_tsl(data, multiplier):
     if data.empty or len(data) < ADX_PERIOD: return np.nan
     latest_atr = data['ATR'].iloc[-1]
@@ -106,9 +101,7 @@ def process_ticker_data(data, ticker):
     data.ta.ema(length=EMA_FAST, append=True) 
     data.ta.ema(length=EMA_SLOW, append=True) 
     data.ta.rsi(length=RSI_PERIOD, append=True) 
-
     data.dropna(inplace=True)
-
     if len(data) < 2: return None, None 
 
     latest_row = data.iloc[-1]
@@ -144,9 +137,7 @@ def process_ticker_data(data, ticker):
     
     # --- TREND SIGNAL LOGIC ---
     if adx > 25:
-        is_trend_bullish = (ema_f > ema_s) and (di_plus > di_minus) and \
-                           (ema_f_yest < ema_s_yest and ema_f > ema_s) 
-        
+        is_trend_bullish = (ema_f > ema_s) and (di_plus > di_minus) and (ema_f_yest < ema_s_yest and ema_f > ema_s) 
         if is_trend_bullish and (rsi < 70):
             target_price = calculate_take_profit(latest_close, tsl_price, RR_TARGET)
             rr_ratio = calculate_rr(latest_close, tsl_price, target_price)
@@ -166,30 +157,41 @@ def process_ticker_data(data, ticker):
                           'Max Shares (1% Risk)': calculate_position_sizing(latest_close, tsl_price)}
             
     return None, None
-# --- Single Scanning Function (with Timeout Increase) ---
+
+# --- Single Scanning Function (Used for ALL tickers now) ---
 def scan_all_tickers_single(ticker_list, start_date, end_date, status_text):
-    # ... [function setup code] ...
+    trend_signals = []
+    mean_rev_signals = []
+    failed_tickers = []
     
     for i, ticker in enumerate(ticker_list):
-        # ... [status text update] ...
+        market = "TW" if ticker.endswith('.TW') else "US"
+        status_text.text(f"Scanning {market} Stock {i+1}/{len(ticker_list)}: ({ticker})...")
         
         try:
-            # ADD timeout=30 parameter here:
+            # CRITICAL FIX: Add timeout parameter
             data = yf.download(ticker, start=start_date, end=end_date, 
-                               progress=False, show_errors=False, timeout=30)
+                               progress=False, show_errors=False, timeout=TIMEOUT_SECONDS)
             
             # --- PATCH 1: Cleanup Data ---
             data = data.apply(pd.to_numeric, errors='coerce')
             data.dropna(subset=['Close'], inplace=True)
-            # ... (rest of the logic) ...
+
+            if data.empty or len(data) < 40:
+                failed_tickers.append(ticker)
+                continue
             
+            trend_sig, mr_sig = process_ticker_data(data, ticker)
+            if trend_sig: trend_signals.append(trend_sig)
+            if mr_sig: mean_rev_signals.append(mr_sig)
+
             time.sleep(SLOW_DELAY) 
 
         except Exception:
             failed_tickers.append(ticker)
             time.sleep(SLOW_DELAY)
 
-    return trend_signals, mean_rev_signals, failed_tickers  
+    return trend_signals, mean_rev_signals, failed_tickers
 
 # --- 5. Main Scanner Logic (Orchestrator - Simplified) ---
 @st.cache_data(ttl=timedelta(hours=4))
@@ -231,7 +233,7 @@ def main():
         all_tickers = sorted(list(set([t for key in selected_keys for t in ticker_groups[key]])))
 
         st.info(f"Scanning **{len(all_tickers)}** unique tickers. Scan time will be longer.")
-        st.caption("All stocks are now scanned one-by-one with a 1.5s delay for stability.")
+        st.caption(f"All stocks scanned one-by-one with {SLOW_DELAY}s delay and {TIMEOUT_SECONDS}s timeout.")
         
         run_button = st.button("▶️ Run Advanced Scan")
         
