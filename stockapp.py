@@ -1,9 +1,11 @@
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 from datetime import datetime, timedelta
 import numpy as np
+import time # <<< FIX 1: Import time for delay
 
 # --- 1. Global Parameters (Direct Translation of R Code) ---
 ADX_PERIOD = 14
@@ -72,7 +74,6 @@ def calculate_tsl(data, multiplier):
     if data.empty or len(data) < ADX_PERIOD:
         return np.nan
 
-    # pandas_ta uses 'ATR' column name for the latest value
     latest_atr = data['ATR'].iloc[-1]
     if pd.isna(latest_atr) or latest_atr <= 0:
         return np.nan
@@ -131,10 +132,8 @@ def run_advanced_scan(all_tickers_list):
     failed_tickers = []
     
     end_date = datetime.now()
-    # Need sufficient data for ADX (14) and EMA(26), plus padding
     start_date = end_date - timedelta(days=DATA_DAYS)
     
-    # Placeholder for Streamlit feedback
     status_text = st.empty()
     
     for i, ticker in enumerate(all_tickers_list):
@@ -146,19 +145,18 @@ def run_advanced_scan(all_tickers_list):
             # 1. Fetch Data
             data = yf.download(ticker, start=start_date, end=end_date, progress=False, show_errors=False)
 
-            if data.empty or len(data) < (EMA_SLOW * 2): # Need enough data for 26-period EMA
+            # <<< FIX 2: Relaxed the initial data length check >>>
+            if data.empty or len(data) < 40: 
                 failed_tickers.append(ticker)
                 continue
             
             # 2. Calculate Indicators (pandas_ta)
-            # ADX(14) also calculates +DI and -DI
             data.ta.adx(length=ADX_PERIOD, append=True) 
-            data.ta.atr(length=ADX_PERIOD, append=True) # ATR(14) for TSL
-            data.ta.ema(length=EMA_FAST, append=True) # EMA(13)
-            data.ta.ema(length=EMA_SLOW, append=True) # EMA(26)
-            data.ta.rsi(length=RSI_PERIOD, append=True) # RSI(14)
+            data.ta.atr(length=ADX_PERIOD, append=True) 
+            data.ta.ema(length=EMA_FAST, append=True) 
+            data.ta.ema(length=EMA_SLOW, append=True) 
+            data.ta.rsi(length=RSI_PERIOD, append=True) 
 
-            # Drop rows with NaN values (start of indicators)
             data.dropna(inplace=True)
 
             if len(data) < 2:
@@ -178,11 +176,9 @@ def run_advanced_scan(all_tickers_list):
             ema_s = latest_row[f'EMA_{EMA_SLOW}']
             latest_close = latest_row['Close']
             
-            # Use yesterday's EMA values for crossover check
             ema_f_yest = yesterday_row[f'EMA_{EMA_FAST}']
             ema_s_yest = yesterday_row[f'EMA_{EMA_SLOW}']
 
-            # Get Volume (mean of last 20 days for robustness, or just last day)
             avg_volume = data['Volume'].iloc[-20:].mean()
             
             # --- 4. Apply Initial Filters ---
@@ -206,7 +202,7 @@ def run_advanced_scan(all_tickers_list):
             if adx > 25:
                 # Trend is strong and bullish if EMA and DI are aligned
                 is_trend_bullish = (ema_f > ema_s) and (di_plus > di_minus) and \
-                                   (ema_f_yest < ema_s_yest and ema_f > ema_s) # Added EMA Crossover condition
+                                   (ema_f_yest < ema_s_yest and ema_f > ema_s) 
                 
                 is_valid_entry = is_trend_bullish and (rsi < 70)
                 
@@ -230,7 +226,6 @@ def run_advanced_scan(all_tickers_list):
 
             # --- MEAN REVERSION SIGNAL LOGIC (ADX < 20, RSI < 30, R/R > 1.0) ---
             elif adx < 20 and rsi < 30:
-                # Target is the 26-day EMA
                 target_price = round(ema_s, 2)
                 rr_ratio = calculate_rr(latest_close, tsl_price, target_price)
 
@@ -247,9 +242,12 @@ def run_advanced_scan(all_tickers_list):
                     })
 
         except Exception as e:
-            # Catch data errors or yfinance connection issues
             failed_tickers.append(ticker)
-            # st.error(f"Error processing {ticker}: {e}") # Debugging
+            # Optional: Uncomment below to see the error in the console
+            # print(f"Error processing {ticker}: {e}") 
+            
+        # <<< FIX 1: Add a slight delay to avoid rate limiting >>>
+        time.sleep(0.5) 
 
     status_text.empty()
     return pd.DataFrame(trend_signals), pd.DataFrame(mean_reversion_signals), failed_tickers
@@ -322,7 +320,7 @@ def main():
         # Failed Tickers
         st.subheader(f"⚠️ Failed Tickers - {len(failed_tickers)}")
         if failed_tickers:
-            st.warning("Could not retrieve data or failed initial checks.")
+            st.warning("Could not retrieve data or failed initial checks. This is often due to delisted tickers or rate limits.")
             st.dataframe(pd.DataFrame({'Ticker': failed_tickers}), use_container_width=False, hide_index=True)
         else:
             st.success("All selected tickers were successfully processed.")
