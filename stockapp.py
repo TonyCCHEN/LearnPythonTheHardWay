@@ -284,6 +284,171 @@ def scan_tw_tickers(tw_list, start_date, end_date, status_text):
             failed_tickers.append(ticker)
             time.sleep(1.5)
 
+    return trend_signals, mean_rev_signals, failed_tickers# --- Core Processing Logic (Shared) ---
+def process_ticker_data(data, ticker):
+    """Processes cleaned data through indicators and signal logic."""
+    # (The logic remains the same as previously defined, using ATR_MULTIPLIER_CONFIG)
+    multiplier = ATR_MULTIPLIER_CONFIG.get(ticker, ATR_MULTIPLIER_CONFIG["DEFAULT"])
+    
+    # Calculate Indicators
+    data.ta.adx(length=ADX_PERIOD, append=True) 
+    data.ta.atr(length=ADX_PERIOD, append=True) 
+    data.ta.ema(length=EMA_FAST, append=True) 
+    data.ta.ema(length=EMA_SLOW, append=True) 
+    data.ta.rsi(length=RSI_PERIOD, append=True) 
+
+    data.dropna(inplace=True)
+
+    if len(data) < 2:
+        return None, None # Not enough data
+
+    # Extract Latest Values
+    latest_row = data.iloc[-1]
+    yesterday_row = data.iloc[-2]
+
+    adx = latest_row[f'ADX_{ADX_PERIOD}']
+    di_plus = latest_row[f'DMP_{ADX_PERIOD}']
+    di_minus = latest_row[f'DMN_{ADX_PERIOD}']
+    rsi = latest_row[f'RSI_{RSI_PERIOD}']
+    ema_f = latest_row[f'EMA_{EMA_FAST}']
+    ema_s = latest_row[f'EMA_{EMA_SLOW}']
+    latest_close = latest_row['Close']
+    
+    ema_f_yest = yesterday_row[f'EMA_{EMA_FAST}']
+    ema_s_yest = yesterday_row[f'EMA_{EMA_SLOW}']
+
+    avg_volume = data['Volume'].iloc[-20:].mean()
+    
+    # --- Apply Initial Filters ---
+    if pd.isna(adx) or pd.isna(rsi) or pd.isna(latest_close) or pd.isna(avg_volume):
+        return None, None
+    if avg_volume < MIN_VOLUME or latest_close < MIN_PRICE:
+        return None, None
+
+    # Calculate TSL and R/R components
+    tsl_price = calculate_tsl(data, multiplier)
+    if pd.isna(tsl_price) or tsl_price <= 0:
+        return None, None
+        
+    stop_distance = latest_close - tsl_price
+    if stop_distance / latest_close < TSL_BUFFER_PERCENT:
+        return None, None
+    
+    signal_data = {
+        'Ticker': ticker, 'Close': f"{latest_close:.2f}", 
+        'ADX': f"{adx:.2f}", 'RSI': f"{rsi:.2f}", 'TSL': tsl_price
+    }
+    
+    # --- TREND SIGNAL LOGIC ---
+    if adx > 25:
+        is_trend_bullish = (ema_f > ema_s) and (di_plus > di_minus) and \
+                           (ema_f_yest < ema_s_yest and ema_f > ema_s) 
+        
+        if is_trend_bullish and (rsi < 70):
+            target_price = calculate_take_profit(latest_close, tsl_price, RR_TARGET)
+            rr_ratio = calculate_rr(latest_close, tsl_price, target_price)
+            
+            if not pd.isna(rr_ratio) and rr_ratio >= RR_TARGET:
+                return {**signal_data, 'R_R': rr_ratio, 'Target': target_price, 
+                        'DI+': f"{di_plus:.2f}", 'DI-': f"{di_minus:.2f}",
+                        'Max Shares (1% Risk)': calculate_position_sizing(latest_close, tsl_price)}, None
+
+    # --- MEAN REVERSION SIGNAL LOGIC ---
+    elif adx < 20 and rsi < 30:
+        target_price = round(ema_s, 2)
+        rr_ratio = calculate_rr(latest_close, tsl_price, target_price)
+
+        if not pd.isna(rr_ratio) and rr_ratio > 1.0:
+            return None, {**signal_data, 'R_R': rr_ratio, 'Target (EMA_26)': target_price,
+                          'Max Shares (1% Risk)': calculate_position_sizing(latest_close, tsl_price)}
+            
+    return None, None
+
+# --- US/Batch Scanning Function ---
+def scan_us_tickers(us_list, start_date, end_date, status_text):
+    trend_signals = []
+    mean_rev_signals = []
+    failed_tickers = []
+    total_us = len(us_list)
+    
+    us_batches = [us_list[i:i + BATCH_SIZE] for i in range(0, total_us, BATCH_SIZE)]
+    current_count = 0
+
+    for batch_index, batch in enumerate(us_batches):
+        batch_tickers_str = " ".join(batch)
+        current_count += len(batch)
+
+        status_text.text(f"Scanning US/Batch {batch_index+1}/{len(us_batches)}: ({current_count}/{total_us})...")
+        
+        try:
+            batch_data = yf.download(batch_tickers_str, start=start_date, end=end_date, progress=False, show_errors=False)
+            time.sleep(1) # Delay between batches
+        except Exception:
+            failed_tickers.extend(batch)
+            continue
+            
+        for ticker in batch:
+            try:
+                if isinstance(batch_data.columns, pd.MultiIndex):
+                    if ticker in batch_data.columns.get_level_values(1):
+                        data = batch_data.loc[:, (slice(None), ticker)]
+                        data.columns = data.columns.droplevel(1) 
+                    else:
+                        failed_tickers.append(ticker)
+                        continue
+                elif ticker == batch[0] and len(batch) == 1: 
+                    data = batch_data
+                else:
+                    failed_tickers.append(ticker)
+                    continue
+
+                # --- PATCH 1: Cleanup Data ---
+                data = data.apply(pd.to_numeric, errors='coerce')
+                data.dropna(subset=['Close'], inplace=True)
+                
+                if data.empty or len(data) < 40:
+                    failed_tickers.append(ticker)
+                    continue
+
+                trend_sig, mr_sig = process_ticker_data(data, ticker)
+                if trend_sig: trend_signals.append(trend_sig)
+                if mr_sig: mean_rev_signals.append(mr_sig)
+
+            except Exception:
+                failed_tickers.append(ticker)
+                
+    return trend_signals, mean_rev_signals, failed_tickers
+
+# --- TW/Single Scanning Function ---
+def scan_tw_tickers(tw_list, start_date, end_date, status_text):
+    trend_signals = []
+    mean_rev_signals = []
+    failed_tickers = []
+    
+    for i, ticker in enumerate(tw_list):
+        status_text.text(f"Scanning TW/Single {i+1}/{len(tw_list)}: ({ticker})...")
+        
+        try:
+            data = yf.download(ticker, start=start_date, end=end_date, progress=False, show_errors=False)
+            
+            # --- PATCH 1: Cleanup Data ---
+            data = data.apply(pd.to_numeric, errors='coerce')
+            data.dropna(subset=['Close'], inplace=True)
+
+            if data.empty or len(data) < 40:
+                failed_tickers.append(ticker)
+                continue
+            
+            trend_sig, mr_sig = process_ticker_data(data, ticker)
+            if trend_sig: trend_signals.append(trend_sig)
+            if mr_sig: mean_rev_signals.append(mr_sig)
+
+            time.sleep(1.5) # Slow down international requests significantly
+
+        except Exception:
+            failed_tickers.append(ticker)
+            time.sleep(1.5)
+
     return trend_signals, mean_rev_signals, failed_tickers
 
 # --- 5. Main Scanner Logic (Orchestrator) ---
@@ -293,6 +458,20 @@ def run_advanced_scan(all_tickers_list):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=DATA_DAYS)
 
-    # 1. Split Tickers
-    # Corrected (PATCH):
-us_tickers = [t for t in all_tickers_list if not t.endswith('.TW')]
+    # 1. Split Tickers (SYNTAX FIX APPLIED HERE)
+    us_tickers = [t for t in all_tickers_list if not t.endswith('.TW')]
+    tw_tickers = [t for t in all_tickers_list if t.endswith('.TW')]
+    
+    # 2. Run US Scan (Batch)
+    us_trend, us_mr, us_failed = scan_us_tickers(us_tickers, start_date, end_date, status_text)
+    
+    # 3. Run TW Scan (Slow/Single)
+    tw_trend, tw_mr, tw_failed = scan_tw_tickers(tw_tickers, start_date, end_date, status_text)
+
+    # 4. Combine Results
+    trend_df = pd.DataFrame(us_trend + tw_trend)
+    mean_rev_df = pd.DataFrame(us_mr + tw_mr)
+    failed_list = us_failed + tw_failed
+
+    status_text.empty()
+    return trend_df, mean_rev_df, failed_list
