@@ -1,13 +1,12 @@
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 from datetime import datetime, timedelta
 import numpy as np
-import time # <<< FIX 1: Import time for delay
+import time # Essential for batch stability
 
-# --- 1. Global Parameters (Direct Translation of R Code) ---
+# --- 1. Global Parameters ---
 ADX_PERIOD = 14
 RSI_PERIOD = 14
 EMA_FAST = 13
@@ -17,6 +16,7 @@ RR_TARGET = 2.5       # CRITICAL: Minimum R/R ratio required for Trend
 MIN_VOLUME = 100000   # Liquidity filter
 MIN_PRICE = 5         # Price filter
 TSL_BUFFER_PERCENT = 0.02 # TSL must be at least 2% away from close
+BATCH_SIZE = 25       # Size of each batch request to yfinance
 
 # --- 2. Dynamic ATR Multiplier Configuration ---
 ATR_MULTIPLIER_CONFIG = {
@@ -29,7 +29,7 @@ ATR_MULTIPLIER_CONFIG = {
     "DEFAULT": 3.0
 }
 
-# --- 3. Ticker List Assembly (Simplified for Streamlit) ---
+# --- 3. Ticker List Assembly ---
 def get_ticker_lists():
     # Simplified S&P 500 list
     sp500_tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'JPM', 'JNJ', 'V', 'WMT', 'PG', 'MA', 'UNH', 'HD', 'BAC', 'LLY', 'NOW', 'DHI']
@@ -38,7 +38,7 @@ def get_ticker_lists():
         'AAPL', 'XLV', 'NFLX', 'ALAB', 'IJR', 'AMD', 'AMZN', 'RMBS', 'VPU', 'VIS', 'SHOP', 'SCHW', 'AVGO', 'ONDS', 
         'QCOM', 'META', 'NVDA', 'MRVL', 'SITM', 'ISRG', 'BRK-B', 'CRWD', 'TSLA', 'ASML', 'PLTR', 'GOOGL', 'HIMS', 
         'VRT', 'NRG', 'RTX', 'NVTS', 'CRUS', 'ENPH', 'PYPL', 'SOFI', 'MU', 'VST', 'AOSL', 'CRDO', 'TEM', 'ZS', 
-        'LLY', 'TTEK', 'MORN', 'SPXC', 'GTLS', 'PPC', 'CPAY', 'CAG', 'TAP', 'DVA', 'AA'
+        'LLY', 'TTEK', 'MORN', 'SPXC', 'GTLS', 'PPC', 'CPAY', 'CAG', 'TAP', 'DVA', 'AA', 'BTC-USD'
     ]
 
     # Combined TW stocks list (Top 150)
@@ -78,7 +78,6 @@ def calculate_tsl(data, multiplier):
     if pd.isna(latest_atr) or latest_atr <= 0:
         return np.nan
 
-    # Look back for the highest high over the ATR period (14 days, since ADX_PERIOD is 14)
     lookback_highs = data['High'].iloc[-ADX_PERIOD:].max()
     
     if pd.isna(lookback_highs):
@@ -122,11 +121,11 @@ def calculate_position_sizing(entry_price, tsl_price, capital=1000000, risk_perc
         return 0
     return int(risk_amount // risk_per_share)
 
-# --- 5. Main Scanner Logic ---
+# --- 5. Main Scanner Logic (with Batching) ---
 
 @st.cache_data(ttl=timedelta(hours=4))
 def run_advanced_scan(all_tickers_list):
-    """Fetches data, calculates indicators, and runs the signal logic for all tickers."""
+    """Fetches data in batches, calculates indicators, and runs the signal logic."""
     trend_signals = []
     mean_reversion_signals = []
     failed_tickers = []
@@ -135,126 +134,154 @@ def run_advanced_scan(all_tickers_list):
     start_date = end_date - timedelta(days=DATA_DAYS)
     
     status_text = st.empty()
+    total_tickers = len(all_tickers_list)
     
-    for i, ticker in enumerate(all_tickers_list):
-        status_text.text(f"Scanning {ticker} ({i+1}/{len(all_tickers_list)})...")
+    # Split all tickers into batches
+    ticker_batches = [all_tickers_list[i:i + BATCH_SIZE] 
+                      for i in range(0, total_tickers, BATCH_SIZE)]
+    
+    current_count = 0
+    
+    for batch_index, batch in enumerate(ticker_batches):
+        batch_tickers_str = " ".join(batch)
+        current_count += len(batch)
 
-        multiplier = ATR_MULTIPLIER_CONFIG.get(ticker, ATR_MULTIPLIER_CONFIG["DEFAULT"])
-
+        status_text.text(f"Processing batch {batch_index+1}/{len(ticker_batches)}: ({current_count}/{total_tickers})...")
+        
+        # --- Batch Data Fetch ---
         try:
-            # 1. Fetch Data
-            data = yf.download(ticker, start=start_date, end=end_date, progress=False, show_errors=False)
+            batch_data = yf.download(batch_tickers_str, 
+                                     start=start_date, 
+                                     end=end_date, 
+                                     progress=False, 
+                                     show_errors=False)
+            time.sleep(1) # Add a slightly longer pause between batch requests
 
-            # <<< FIX 2: Relaxed the initial data length check >>>
-            if data.empty or len(data) < 40: 
-                failed_tickers.append(ticker)
-                continue
+        except Exception:
+            failed_tickers.extend(batch)
+            continue
             
-            # 2. Calculate Indicators (pandas_ta)
-            data.ta.adx(length=ADX_PERIOD, append=True) 
-            data.ta.atr(length=ADX_PERIOD, append=True) 
-            data.ta.ema(length=EMA_FAST, append=True) 
-            data.ta.ema(length=EMA_SLOW, append=True) 
-            data.ta.rsi(length=RSI_PERIOD, append=True) 
+        # --- Process Each Ticker in the Batch ---
+        for ticker in batch:
+            try:
+                # Handle multi-ticker download structure (multi-index DataFrame)
+                if isinstance(batch_data.columns, pd.MultiIndex):
+                    if ticker in batch_data.columns.get_level_values(1):
+                        data = batch_data.loc[:, (slice(None), ticker)]
+                        data.columns = data.columns.droplevel(1) 
+                    else:
+                        # Ticker failed silently in the batch download
+                        failed_tickers.append(ticker)
+                        continue
+                # Handle single ticker download structure (flat DataFrame)
+                elif ticker == batch[0] and len(batch) == 1: 
+                    data = batch_data
+                else:
+                    # Should not happen with batching logic, but safety net
+                    failed_tickers.append(ticker)
+                    continue
 
-            data.dropna(inplace=True)
-
-            if len(data) < 2:
-                failed_tickers.append(ticker)
-                continue
-
-            # 3. Extract Latest Values
-            latest_row = data.iloc[-1]
-            yesterday_row = data.iloc[-2]
-
-            # Get latest values using pandas_ta default column names
-            adx = latest_row[f'ADX_{ADX_PERIOD}']
-            di_plus = latest_row[f'DMP_{ADX_PERIOD}']
-            di_minus = latest_row[f'DMN_{ADX_PERIOD}']
-            rsi = latest_row[f'RSI_{RSI_PERIOD}']
-            ema_f = latest_row[f'EMA_{EMA_FAST}']
-            ema_s = latest_row[f'EMA_{EMA_SLOW}']
-            latest_close = latest_row['Close']
-            
-            ema_f_yest = yesterday_row[f'EMA_{EMA_FAST}']
-            ema_s_yest = yesterday_row[f'EMA_{EMA_SLOW}']
-
-            avg_volume = data['Volume'].iloc[-20:].mean()
-            
-            # --- 4. Apply Initial Filters ---
-            if pd.isna(adx) or pd.isna(rsi) or pd.isna(latest_close) or pd.isna(avg_volume):
-                continue
-            if avg_volume < MIN_VOLUME:
-                continue
-            if latest_close < MIN_PRICE:
-                continue
-
-            # 5. Calculate TSL, Target, R/R
-            tsl_price = calculate_tsl(data, multiplier)
-            if pd.isna(tsl_price) or tsl_price <= 0:
-                continue
+                if data.empty or len(data) < 40: 
+                    failed_tickers.append(ticker)
+                    continue
                 
-            stop_distance = latest_close - tsl_price
-            if stop_distance / latest_close < TSL_BUFFER_PERCENT:
-                continue
-            
-            # --- TREND SIGNAL LOGIC (ADX > 25, RSI < 70, R/R >= 2.5) ---
-            if adx > 25:
-                # Trend is strong and bullish if EMA and DI are aligned
-                is_trend_bullish = (ema_f > ema_s) and (di_plus > di_minus) and \
-                                   (ema_f_yest < ema_s_yest and ema_f > ema_s) 
+                # --- Indicator Calculation ---
+                data.ta.adx(length=ADX_PERIOD, append=True) 
+                data.ta.atr(length=ADX_PERIOD, append=True) 
+                data.ta.ema(length=EMA_FAST, append=True) 
+                data.ta.ema(length=EMA_SLOW, append=True) 
+                data.ta.rsi(length=RSI_PERIOD, append=True) 
+
+                data.dropna(inplace=True)
+
+                if len(data) < 2:
+                    failed_tickers.append(ticker)
+                    continue
+
+                # --- Extract and Filter ---
+                latest_row = data.iloc[-1]
+                yesterday_row = data.iloc[-2]
+
+                adx = latest_row[f'ADX_{ADX_PERIOD}']
+                di_plus = latest_row[f'DMP_{ADX_PERIOD}']
+                di_minus = latest_row[f'DMN_{ADX_PERIOD}']
+                rsi = latest_row[f'RSI_{RSI_PERIOD}']
+                ema_f = latest_row[f'EMA_{EMA_FAST}']
+                ema_s = latest_row[f'EMA_{EMA_SLOW}']
+                latest_close = latest_row['Close']
                 
-                is_valid_entry = is_trend_bullish and (rsi < 70)
+                ema_f_yest = yesterday_row[f'EMA_{EMA_FAST}']
+                ema_s_yest = yesterday_row[f'EMA_{EMA_SLOW}']
+
+                # Average volume filter
+                avg_volume = data['Volume'].iloc[-20:].mean()
                 
-                if is_valid_entry:
-                    target_price = calculate_take_profit(latest_close, tsl_price, RR_TARGET)
-                    rr_ratio = calculate_rr(latest_close, tsl_price, target_price)
+                if pd.isna(adx) or pd.isna(rsi) or pd.isna(latest_close) or pd.isna(avg_volume):
+                    continue
+                if avg_volume < MIN_VOLUME:
+                    continue
+                if latest_close < MIN_PRICE:
+                    continue
+
+                # Calculate TSL and R/R
+                tsl_price = calculate_tsl(data, multiplier)
+                if pd.isna(tsl_price) or tsl_price <= 0:
+                    continue
                     
-                    if not pd.isna(rr_ratio) and rr_ratio >= RR_TARGET:
-                        trend_signals.append({
+                stop_distance = latest_close - tsl_price
+                if stop_distance / latest_close < TSL_BUFFER_PERCENT:
+                    continue
+                
+                # --- TREND SIGNAL LOGIC ---
+                if adx > 25:
+                    is_trend_bullish = (ema_f > ema_s) and (di_plus > di_minus) and \
+                                       (ema_f_yest < ema_s_yest and ema_f > ema_s) 
+                    
+                    if is_trend_bullish and (rsi < 70):
+                        target_price = calculate_take_profit(latest_close, tsl_price, RR_TARGET)
+                        rr_ratio = calculate_rr(latest_close, tsl_price, target_price)
+                        
+                        if not pd.isna(rr_ratio) and rr_ratio >= RR_TARGET:
+                            trend_signals.append({
+                                'Ticker': ticker,
+                                'Close': f"{latest_close:.2f}",
+                                'R_R': rr_ratio,
+                                'TSL': tsl_price,
+                                'Target': target_price,
+                                'ADX': f"{adx:.2f}",
+                                'RSI': f"{rsi:.2f}",
+                                'DI+': f"{di_plus:.2f}",
+                                'DI-': f"{di_minus:.2f}",
+                                'Max Shares (1% Risk)': calculate_position_sizing(latest_close, tsl_price)
+                            })
+
+                # --- MEAN REVERSION SIGNAL LOGIC ---
+                elif adx < 20 and rsi < 30:
+                    target_price = round(ema_s, 2)
+                    rr_ratio = calculate_rr(latest_close, tsl_price, target_price)
+
+                    if not pd.isna(rr_ratio) and rr_ratio > 1.0:
+                        mean_reversion_signals.append({
                             'Ticker': ticker,
                             'Close': f"{latest_close:.2f}",
                             'R_R': rr_ratio,
                             'TSL': tsl_price,
-                            'Target': target_price,
+                            'Target (EMA_26)': target_price,
                             'ADX': f"{adx:.2f}",
                             'RSI': f"{rsi:.2f}",
-                            'DI+': f"{di_plus:.2f}",
-                            'DI-': f"{di_minus:.2f}",
                             'Max Shares (1% Risk)': calculate_position_sizing(latest_close, tsl_price)
                         })
 
-            # --- MEAN REVERSION SIGNAL LOGIC (ADX < 20, RSI < 30, R/R > 1.0) ---
-            elif adx < 20 and rsi < 30:
-                target_price = round(ema_s, 2)
-                rr_ratio = calculate_rr(latest_close, tsl_price, target_price)
-
-                if not pd.isna(rr_ratio) and rr_ratio > 1.0:
-                    mean_reversion_signals.append({
-                        'Ticker': ticker,
-                        'Close': f"{latest_close:.2f}",
-                        'R_R': rr_ratio,
-                        'TSL': tsl_price,
-                        'Target (EMA_26)': target_price,
-                        'ADX': f"{adx:.2f}",
-                        'RSI': f"{rsi:.2f}",
-                        'Max Shares (1% Risk)': calculate_position_sizing(latest_close, tsl_price)
-                    })
-
-        except Exception as e:
-            failed_tickers.append(ticker)
-            # Optional: Uncomment below to see the error in the console
-            # print(f"Error processing {ticker}: {e}") 
-            
-        # <<< FIX 1: Add a slight delay to avoid rate limiting >>>
-        time.sleep(0.5) 
-
+            except Exception:
+                failed_tickers.append(ticker)
+                
     status_text.empty()
     return pd.DataFrame(trend_signals), pd.DataFrame(mean_reversion_signals), failed_tickers
 
 # --- 6. Streamlit UI ---
 
 def main():
+    st.set_page_config(layout="wide", page_title="Advanced Stock Screener")
     st.title("🛡️ Systematic Daily Stock Screener (ADX + R/R Filter)")
     st.markdown("---")
     
@@ -275,7 +302,7 @@ def main():
         all_tickers = sorted(list(set([t for key in selected_keys for t in ticker_groups[key]])))
 
         st.info(f"Scanning **{len(all_tickers)}** unique tickers.")
-        st.caption("Data is cached for 4 hours. Click 'Run Scan' to fetch new data.")
+        st.caption("Data is cached for 4 hours. Batch size: **25**.")
         
         run_button = st.button("▶️ Run Advanced Scan")
         
@@ -291,12 +318,7 @@ def main():
         st.subheader(f"📈 Trend Following Signals (R/R $\\ge$ {RR_TARGET}:1) - {len(trend_df)}")
         if not trend_df.empty:
             st.dataframe(trend_df.sort_values(by='ADX', ascending=False), use_container_width=True, hide_index=True)
-            st.markdown(
-                """
-                **Strategy:** Buy entry on confirmed trend strength (**ADX > 25**), momentum alignment (**DI+ > DI-**, **EMA-F > EMA-S**), 
-                and **RSI < 70** (not overbought). Requires high **Risk/Reward** (R/R $\\ge$ 2.5).
-                """
-            )
+            st.markdown("**(Risk/Reward)** R/R $\\ge$ 2.5. Trend is strong (**ADX > 25**) and momentum is not overbought (**RSI < 70**).")
         else:
             st.info("No Trend Following signals found meeting all high-expectancy criteria.")
 
@@ -306,12 +328,7 @@ def main():
         st.subheader(f"📉 Mean Reversion Signals (Oversold/Consolidation) - {len(mean_rev_df)}")
         if not mean_rev_df.empty:
             st.dataframe(mean_rev_df.sort_values(by='RSI', ascending=True), use_container_width=True, hide_index=True)
-            st.markdown(
-                """
-                **Strategy:** Buy entry on oversold condition (**RSI < 30**) in a low-trend environment (**ADX < 20**). 
-                Target is the **EMA(26)** (the mean). Requires **R/R > 1.0**.
-                """
-            )
+            st.markdown("**(Oversold)** RSI < 30 in a consolidation (**ADX < 20**). Target is the **EMA(26)**.")
         else:
             st.info("No Mean Reversion signals found.")
 
@@ -320,7 +337,7 @@ def main():
         # Failed Tickers
         st.subheader(f"⚠️ Failed Tickers - {len(failed_tickers)}")
         if failed_tickers:
-            st.warning("Could not retrieve data or failed initial checks. This is often due to delisted tickers or rate limits.")
+            st.warning("Could not retrieve data or failed initial checks. This is often due to delisted tickers or aggressive filtering.")
             st.dataframe(pd.DataFrame({'Ticker': failed_tickers}), use_container_width=False, hide_index=True)
         else:
             st.success("All selected tickers were successfully processed.")
