@@ -166,40 +166,30 @@ def process_ticker_data(data, ticker):
                           'Max Shares (1% Risk)': calculate_position_sizing(latest_close, tsl_price)}
             
     return None, None
-
-# --- Single Scanning Function (Used for ALL tickers now) ---
+# --- Single Scanning Function (with Timeout Increase) ---
 def scan_all_tickers_single(ticker_list, start_date, end_date, status_text):
-    trend_signals = []
-    mean_rev_signals = []
-    failed_tickers = []
+    # ... [function setup code] ...
     
     for i, ticker in enumerate(ticker_list):
-        # Indicate whether it's a US or TW stock for clarity
-        market = "TW" if ticker.endswith('.TW') else "US"
-        status_text.text(f"Scanning {market} Stock {i+1}/{len(ticker_list)}: ({ticker})...")
+        # ... [status text update] ...
         
         try:
-            data = yf.download(ticker, start=start_date, end=end_date, progress=False, show_errors=False)
+            # ADD timeout=30 parameter here:
+            data = yf.download(ticker, start=start_date, end=end_date, 
+                               progress=False, show_errors=False, timeout=30)
             
             # --- PATCH 1: Cleanup Data ---
             data = data.apply(pd.to_numeric, errors='coerce')
             data.dropna(subset=['Close'], inplace=True)
-
-            if data.empty or len(data) < 40:
-                failed_tickers.append(ticker)
-                continue
+            # ... (rest of the logic) ...
             
-            trend_sig, mr_sig = process_ticker_data(data, ticker)
-            if trend_sig: trend_signals.append(trend_sig)
-            if mr_sig: mean_rev_signals.append(mr_sig)
-
             time.sleep(SLOW_DELAY) 
 
         except Exception:
             failed_tickers.append(ticker)
             time.sleep(SLOW_DELAY)
 
-    return trend_signals, mean_rev_signals, failed_tickers
+    return trend_signals, mean_rev_signals, failed_tickers  
 
 # --- 5. Main Scanner Logic (Orchestrator - Simplified) ---
 @st.cache_data(ttl=timedelta(hours=4))
