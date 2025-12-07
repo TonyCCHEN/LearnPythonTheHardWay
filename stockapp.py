@@ -16,9 +16,9 @@ RR_TARGET = 2.5
 MIN_VOLUME = 100000  
 MIN_PRICE = 5        
 TSL_BUFFER_PERCENT = 0.02 
-BATCH_SIZE = 25      
+SLOW_DELAY = 1.5 # Delay for ALL tickers (was 1.5s only for TW, now for all)
 
-# --- 2. Dynamic ATR Multiplier Configuration ---
+# --- 2. Dynamic ATR Multiplier Configuration (unchanged) ---
 ATR_MULTIPLIER_CONFIG = {
     "TSLA": 3.5, "CRWD": 3.5, "META": 3.5, "AMZN": 3.0, "NVDA": 3.5, "AMD": 3.5, "AVGO": 3.5, "MSFT": 3.0,
     "ALAB": 3.5, "PLTR": 3.5, "ZM": 3.5, "SNOW": 3.5, "DASH": 3.5, "UBER": 3.5, "ABNB": 3.5, "ROKU": 3.5,
@@ -29,7 +29,7 @@ ATR_MULTIPLIER_CONFIG = {
     "DEFAULT": 3.0
 }
 
-# --- 3. Ticker List Assembly ---
+# --- 3. Ticker List Assembly (unchanged) ---
 def get_ticker_lists():
     sp500_tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'JPM', 'JNJ', 'V', 'WMT', 'PG', 'MA', 'UNH', 'HD', 'BAC', 'LLY', 'NOW', 'DHI']
     
@@ -65,54 +65,42 @@ def get_ticker_lists():
         "TW ETF (00631L.TW)": tw_etf
     }
 
-# --- 4. Helper Functions ---
-# (Helper functions for calculate_tsl, calculate_take_profit, calculate_rr, calculate_position_sizing)
+# --- 4. Helper Functions (Unchanged) ---
+# [Contains calculate_tsl, calculate_take_profit, calculate_rr, calculate_position_sizing]
 
 def calculate_tsl(data, multiplier):
-    if data.empty or len(data) < ADX_PERIOD:
-        return np.nan
+    if data.empty or len(data) < ADX_PERIOD: return np.nan
     latest_atr = data['ATR'].iloc[-1]
-    if pd.isna(latest_atr) or latest_atr <= 0:
-        return np.nan
+    if pd.isna(latest_atr) or latest_atr <= 0: return np.nan
     lookback_highs = data['High'].iloc[-ADX_PERIOD:].max()
-    if pd.isna(lookback_highs):
-        return np.nan
+    if pd.isna(lookback_highs): return np.nan
     tsl = lookback_highs - (latest_atr * multiplier)
     return round(tsl, 2) if tsl > 0 else np.nan
 
 def calculate_take_profit(entry_price, stop_loss, rr_ratio):
-    if pd.isna(entry_price) or pd.isna(stop_loss) or stop_loss <= 0:
-        return np.nan
+    if pd.isna(entry_price) or pd.isna(stop_loss) or stop_loss <= 0: return np.nan
     risk = entry_price - stop_loss
-    if risk <= 0:
-        return np.nan
+    if risk <= 0: return np.nan
     target = entry_price + (risk * rr_ratio)
     return round(target, 2)
 
 def calculate_rr(entry_price, tsl_price, tp_price):
-    if pd.isna(entry_price) or pd.isna(tsl_price) or pd.isna(tp_price):
-        return np.nan
+    if pd.isna(entry_price) or pd.isna(tsl_price) or pd.isna(tp_price): return np.nan
     risk = entry_price - tsl_price
     reward = tp_price - entry_price
-    if risk <= 0 or reward <= 0:
-        return np.nan
+    if risk <= 0 or reward <= 0: return np.nan
     return round(reward / risk, 2)
 
 def calculate_position_sizing(entry_price, tsl_price, capital=1000000, risk_percent=0.01):
-    if pd.isna(entry_price) or pd.isna(tsl_price) or tsl_price <= 0:
-        return 0
+    if pd.isna(entry_price) or pd.isna(tsl_price) or tsl_price <= 0: return 0
     risk_amount = capital * risk_percent
     risk_per_share = entry_price - tsl_price
-    if risk_per_share <= 0:
-        return 0
+    if risk_per_share <= 0: return 0
     return int(risk_amount // risk_per_share)
 
 # --- Core Processing Logic (Shared) ---
 def process_ticker_data(data, ticker):
-    """Processes cleaned data through indicators and signal logic."""
     multiplier = ATR_MULTIPLIER_CONFIG.get(ticker, ATR_MULTIPLIER_CONFIG["DEFAULT"])
-    
-    # Calculate Indicators
     data.ta.adx(length=ADX_PERIOD, append=True) 
     data.ta.atr(length=ADX_PERIOD, append=True) 
     data.ta.ema(length=EMA_FAST, append=True) 
@@ -121,10 +109,8 @@ def process_ticker_data(data, ticker):
 
     data.dropna(inplace=True)
 
-    if len(data) < 2:
-        return None, None # Not enough data
+    if len(data) < 2: return None, None 
 
-    # Extract Latest Values
     latest_row = data.iloc[-1]
     yesterday_row = data.iloc[-2]
 
@@ -141,20 +127,15 @@ def process_ticker_data(data, ticker):
 
     avg_volume = data['Volume'].iloc[-20:].mean()
     
-    # --- Apply Initial Filters ---
-    if pd.isna(adx) or pd.isna(rsi) or pd.isna(latest_close) or pd.isna(avg_volume):
-        return None, None
-    if avg_volume < MIN_VOLUME or latest_close < MIN_PRICE:
-        return None, None
+    # --- Apply Filters ---
+    if pd.isna(adx) or pd.isna(rsi) or pd.isna(latest_close) or pd.isna(avg_volume): return None, None
+    if avg_volume < MIN_VOLUME or latest_close < MIN_PRICE: return None, None
 
-    # Calculate TSL and R/R components
     tsl_price = calculate_tsl(data, multiplier)
-    if pd.isna(tsl_price) or tsl_price <= 0:
-        return None, None
-        
+    if pd.isna(tsl_price) or tsl_price <= 0: return None, None
+    
     stop_distance = latest_close - tsl_price
-    if stop_distance / latest_close < TSL_BUFFER_PERCENT:
-        return None, None
+    if stop_distance / latest_close < TSL_BUFFER_PERCENT: return None, None
     
     signal_data = {
         'Ticker': ticker, 'Close': f"{latest_close:.2f}", 
@@ -186,154 +167,58 @@ def process_ticker_data(data, ticker):
             
     return None, None
 
-# --- US/Batch Scanning Function ---
-def scan_us_tickers(us_list, start_date, end_date, status_text):
+# --- Single Scanning Function (Used for ALL tickers now) ---
+def scan_all_tickers_single(ticker_list, start_date, end_date, status_text):
     trend_signals = []
     mean_rev_signals = []
     failed_tickers = []
-    total_us = len(us_list)
     
-    us_batches = [us_list[i:i + BATCH_SIZE] for i in range(0, total_us, BATCH_SIZE)]
-    current_count = 0
-
-    for batch_index, batch in enumerate(us_batches):
-        batch_tickers_str = " ".join(batch)
-        current_count += len(batch)
-
-        status_text.text(f"Scanning US/Batch {batch_index+1}/{len(us_batches)}: ({current_count}/{total_us})...")
+    for i, ticker in enumerate(ticker_list):
+        # Indicate whether it's a US or TW stock for clarity
+        market = "TW" if ticker.endswith('.TW') else "US"
+        status_text.text(f"Scanning {market} Stock {i+1}/{len(ticker_list)}: ({ticker})...")
         
         try:
-            batch_data = yf.download(batch_tickers_str, start=start_date, end=end_date, progress=False, show_errors=False)
-            time.sleep(1) # Delay between batches
-        except Exception:
-            failed_tickers.extend(batch)
-            continue
+            data = yf.download(ticker, start=start_date, end=end_date, progress=False, show_errors=False)
             
-        for ticker in batch:
-            try:
-                if isinstance(batch_data.columns, pd.MultiIndex):
-                    if ticker in batch_data.columns.get_level_values(1):
-                        data = batch_data.loc[:, (slice(None), ticker)]
-                        data.columns = data.columns.droplevel(1) 
-                    else:
-                        failed_tickers.append(ticker)
-                        continue
-                elif ticker == batch[0] and len(batch) == 1: 
-                    data = batch_data
-                else:
-                    failed_tickers.append(ticker)
-                    continue
+            # --- PATCH 1: Cleanup Data ---
+            data = data.apply(pd.to_numeric, errors='coerce')
+            data.dropna(subset=['Close'], inplace=True)
 
-                # --- PATCH 1: Cleanup Data ---
-                data = data.apply(pd.to_numeric, errors='coerce')
-                data.dropna(subset=['Close'], inplace=True)
-                
-                if data.empty or len(data) < 40:
-                    failed_tickers.append(ticker)
-                    continue
-
-                trend_sig, mr_sig = process_ticker_data(data, ticker)
-                if trend_sig: trend_signals.append(trend_sig)
-                if mr_sig: mean_rev_signals.append(mr_sig)
-
-            except Exception:
+            if data.empty or len(data) < 40:
                 failed_tickers.append(ticker)
-                
-    return trend_signals, mean_rev_signals, failed_tickers
-# --- US/Batch Scanning Function (FINAL PATCH) ---
-def scan_us_tickers(us_list, start_date, end_date, status_text):
-    trend_signals = []
-    mean_rev_signals = []
-    failed_tickers = []
-    total_us = len(us_list)
-    
-    us_batches = [us_list[i:i + BATCH_SIZE] for i in range(0, total_us, BATCH_SIZE)]
-    current_count = 0
-
-    for batch_index, batch in enumerate(us_batches):
-        batch_tickers_str = " ".join(batch)
-        current_count += len(batch)
-
-        status_text.text(f"Scanning US/Batch {batch_index+1}/{len(us_batches)}: ({current_count}/{total_us})...")
-        
-        try:
-            # Fetch data for the batch
-            batch_data = yf.download(batch_tickers_str, start=start_date, end=end_date, progress=False, show_errors=False)
-            time.sleep(1) # Delay between batches
-        except Exception:
-            failed_tickers.extend(batch)
-            continue
+                continue
             
-        for ticker in batch:
-            try:
-                data = pd.DataFrame() # Initialize empty DataFrame for current ticker
+            trend_sig, mr_sig = process_ticker_data(data, ticker)
+            if trend_sig: trend_signals.append(trend_sig)
+            if mr_sig: mean_rev_signals.append(mr_sig)
 
-                if isinstance(batch_data.columns, pd.MultiIndex):
-                    # --- CRITICAL FIX: Extract using the column names, not just the ticker level ---
-                    # yfinance output structure: ('Close', 'AAPL'), ('High', 'AAPL'), etc.
-                    # We filter columns where the second level (ticker) matches the current ticker
-                    data = batch_data.loc[:, pd.IndexSlice[:, ticker]]
-                    
-                    # Check if data was actually returned for this ticker in the multi-index output
-                    if data.empty or data.shape[1] == 0:
-                        failed_tickers.append(ticker)
-                        continue
-                        
-                    # Drop the ticker level from the column names to get 'Open', 'High', 'Close', etc.
-                    data.columns = data.columns.droplevel(1)
-                    
-                # Handle single ticker case (e.g., if a list only contains one item, yfinance returns a simple DataFrame)
-                elif len(batch) == 1 and ticker == batch[0]: 
-                    data = batch_data
-                else:
-                    # Ticker failed silently during the multi-ticker download (unrecoverable at this stage)
-                    failed_tickers.append(ticker)
-                    continue
+            time.sleep(SLOW_DELAY) 
 
-                # --- PATCH 1: Cleanup Data ---
-                data = data.apply(pd.to_numeric, errors='coerce')
-                data.dropna(subset=['Close'], inplace=True)
-                
-                if data.empty or len(data) < 40:
-                    failed_tickers.append(ticker)
-                    continue
+        except Exception:
+            failed_tickers.append(ticker)
+            time.sleep(SLOW_DELAY)
 
-                # Process indicators and signals
-                trend_sig, mr_sig = process_ticker_data(data, ticker)
-                if trend_sig: trend_signals.append(trend_sig)
-                if mr_sig: mean_rev_signals.append(mr_sig)
-
-            except Exception:
-                failed_tickers.append(ticker)
-                
     return trend_signals, mean_rev_signals, failed_tickers
 
-# --- 5. Main Scanner Logic (Orchestrator) ---
+# --- 5. Main Scanner Logic (Orchestrator - Simplified) ---
 @st.cache_data(ttl=timedelta(hours=4))
 def run_advanced_scan(all_tickers_list):
     status_text = st.empty()
     end_date = datetime.now()
     start_date = end_date - timedelta(days=DATA_DAYS)
 
-    # 1. Split Tickers (Syntax is correct here)
-    us_tickers = [t for t in all_tickers_list if not t.endswith('.TW')]
-    tw_tickers = [t for t in all_tickers_list if t.endswith('.TW')]
-    
-    # 2. Run US Scan (Batch)
-    us_trend, us_mr, us_failed = scan_us_tickers(us_tickers, start_date, end_date, status_text)
-    
-    # 3. Run TW Scan (Slow/Single)
-    tw_trend, tw_mr, tw_failed = scan_tw_tickers(tw_tickers, start_date, end_date, status_text)
+    # Use a single list and a single slow scan for maximum stability
+    trend, mr, failed = scan_all_tickers_single(all_tickers_list, start_date, end_date, status_text)
 
-    # 4. Combine Results
-    trend_df = pd.DataFrame(us_trend + tw_trend)
-    mean_rev_df = pd.DataFrame(us_mr + tw_mr)
-    failed_list = us_failed + tw_failed
+    trend_df = pd.DataFrame(trend)
+    mean_rev_df = pd.DataFrame(mr)
+    failed_list = failed
 
     status_text.empty()
     return trend_df, mean_rev_df, failed_list
 
-# --- 6. Streamlit UI ---
+# --- 6. Streamlit UI (Unchanged) ---
 def main():
     st.set_page_config(layout="wide", page_title="Advanced Stock Screener")
     st.title("🛡️ Systematic Daily Stock Screener (ADX + R/R Filter)")
@@ -355,8 +240,8 @@ def main():
 
         all_tickers = sorted(list(set([t for key in selected_keys for t in ticker_groups[key]])))
 
-        st.info(f"Scanning **{len(all_tickers)}** unique tickers.")
-        st.caption("US stocks are processed in batches (faster); TW stocks are processed one-by-one (stable).")
+        st.info(f"Scanning **{len(all_tickers)}** unique tickers. Scan time will be longer.")
+        st.caption("All stocks are now scanned one-by-one with a 1.5s delay for stability.")
         
         run_button = st.button("▶️ Run Advanced Scan")
         
@@ -365,7 +250,7 @@ def main():
     
     # --- Execute Scan and Display Results ---
     if run_button and all_tickers:
-        with st.spinner('Fetching data and running systematic analysis...'):
+        with st.spinner(f'Starting single-ticker scan for {len(all_tickers)} stocks... This will take a few minutes.'):
             trend_df, mean_rev_df, failed_tickers = run_advanced_scan(all_tickers)
         
         # Trend Signals
@@ -391,7 +276,7 @@ def main():
         # Failed Tickers
         st.subheader(f"⚠️ Failed Tickers - {len(failed_tickers)}")
         if failed_tickers:
-            st.warning("Could not retrieve data or failed initial checks. This is often due to delisted tickers or aggressive filtering.")
+            st.warning("Could not retrieve data or failed initial checks. This may be due to environmental network issues or delisted tickers.")
             st.dataframe(pd.DataFrame({'Ticker': failed_tickers}), use_container_width=False, hide_index=True)
         else:
             st.success("All selected tickers were successfully processed.")
