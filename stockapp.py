@@ -294,4 +294,5 @@ def run_advanced_scan(all_tickers_list):
     start_date = end_date - timedelta(days=DATA_DAYS)
 
     # 1. Split Tickers
-    us_tickers = [t for t in all_tickers_list if not t.endswith('.
+    # Corrected (PATCH):
+us_tickers = [t for t in all_tickers_list if not t.endswith('.TW')]
